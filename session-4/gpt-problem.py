@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+import math 
 
 # final results with this code
 # step=4800: train loss = 1.0883, val loss = 1.4908
@@ -33,6 +34,7 @@ with open('input.txt', 'r', encoding='utf-8') as f:
 # create vocabulary
 chars = sorted(list(set(text)))
 vocab_size = len(chars)
+
 
 # create a mapping from characters to integers
 stoi = { ch:i for i,ch in enumerate(chars) }
@@ -69,22 +71,104 @@ def estimate_loss():
     return out
 
 # Copy your Head, MultiHeadAttention, FeedForward and Block classes here
-    
+
+class Head(nn.Module):
+
+    def __init__(self, head_size):
+        super().__init__()
+        self.keys = nn.Linear(n_embd,head_size, bias=False)
+        self.queries = nn.Linear(n_embd, head_size, bias=False)
+        self.values = nn.Linear(n_embd, head_size, bias=False)
+        self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size))) # store a persistent buffer for the forward pass
+
+    def forward (self, x):
+        B, T, C = x.shape
+        q=self.queries(x)
+        k=self.keys(x)
+        v= self.values(x)
+
+        #weighted attention
+        wei=q@k.transpose(-2,-1)/math.sqrt(k.shape[-1])
+
+        #masked attention
+        tril = torch.tril(torch.ones(T,T, device=x.device))
+
+        masked_wei= wei.masked_fill(tril==0, float('-inf'))
+
+        #softmax
+        attn = F.softmax(masked_wei,dim=-1)
+
+        #dropout
+        dropout=nn.Dropout(p=0) #dropout function (set at 0 for now)
+        attn= dropout(attn)
+
+        #value multiplication
+        out = attn@v
+        return out
+
+class MultiHeadAttention(nn.Module):
+    def __init__(self, num_heads, head_size):
+        super().__init__()
+        self.heads = nn.ModuleList([Head(head_size) for n in range(num_heads)])
+        self.linear_proj= nn.Linear(num_heads*head_size, num_heads*head_size)
+
+    def forward (self, x):
+        out = torch.cat([head(x) for head in self.heads], dim=-1)
+        out= self.linear_proj(out)
+        return out
+
+class FeedForward(nn.Module):
+    """ a simple linear layer followed by a non-linearity """
+    def __init__(self, n_embd):
+        super().__init__()
+        self.linear= nn.Linear(n_embd, 4*n_embd) #four times expansion
+        self.linear2 = nn.Linear(4*n_embd, n_embd)
+        self.sigma= nn.ReLU()
+
+    def forward(self, x):
+        out= self.linear(x)
+        out = self.sigma(out)
+        return self.linear2(out)
+
+
+class Block(nn.Module):
+
+    def __init__(self, n_embd, n_head):
+        super().__init__()
+        head_size = n_embd // n_head
+        self.layer_norm= nn.LayerNorm(n_embd)
+        self.multi_head_attention= MultiHeadAttention(n_head, head_size)
+        self.layer_norm2= nn.LayerNorm(n_embd)
+        self.feed_forward= FeedForward(n_embd)
+
+    def forward(self, x):
+        #residual connection btw layer norm and multi head
+        out= self.multi_head_attention(self.layer_norm(x)) + x
+        out= self.feed_forward(self.layer_norm2(out)) + out
+        return out
+
+
 class GPT(nn.Module):
 
     def __init__(self):
         super().__init__()
-        self.token_embedding_table = ???
-        self.pos_embedding_table = ???
+        self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
+        self.pos_embedding_table = nn.Embedding(block_size,n_embd)
         # define blocks, a layer norm and a linear layer
-        ???
+        self.blocks= nn.ModuleList([Block(n_embd, n_heads) for _ in range(block_size)])
+        self.layer_norm = nn.LayerNorm(n_embd)
+        self.linear_layer = nn.Linear(n_embd, vocab_size)
 
     def forward(self, idx, targets=None):
         B, T = idx.shape
-        token_emb = ??? # (B,T,C)
+        token_emb = self.token_embedding_table(idx) # (B,T,C)
         pos_emb = self.pos_embedding_table(torch.arange(T, device=device)) # (T, C)
-        x = ??? # sum the token embeddings and position embeddings
-        ??? # apply blocks, layer norm and linear layer (leading to the logits variable)
+        x = pos_emb + token_emb # sum the token embeddings and position embeddings
+        # apply blocks, layer norm and linear layer (leading to the logits variable)
+        for block in self.blocks:
+            x = block(x)  # residual connections are handled inside the Block
+        x= self.layer_norm(x)
+        logits= self.linear_layer(x)
 
         # do not modify the rest of the method (it computes the loss during the forward pass)
         if targets is None:
@@ -121,14 +205,15 @@ optimizer = torch.optim.AdamW(m.parameters(), lr=learning_rate)
 
 # training loop
 for iter in range(max_iters): # increase number of steps for good results... 
-    
+    print(iter)
     # evaluate once in a while
     if iter % eval_interval == 0:
         losses = estimate_loss()
-        print (f"step={iter}: train loss = {losses['train']:.4f}, val loss = {losses['val']:.4f}")
+        print(f"step={iter}: train loss = {losses['train']:.4f}, val loss = {losses['val']:.4f}")
 
     # sample a batch of data
     xb, yb = get_batch('train')
+
 
     # evaluate the loss
     logits, loss = m(xb, yb)
